@@ -1,0 +1,116 @@
+%%===========================================================================
+%%     FileName: robot_proto.txt
+%%         Desc: 机器人协议
+%%       Author: liangjingyang
+%%        Email: ljy0922@gmail.com
+%%     HomePage: http://www.cnblogs.com/liangjingyang
+%%      Version: 0.0.1
+%%   LastChange: 2012-12-18 17:59:15
+%%      History:
+%%===========================================================================
+
+
+-module(robot_proto).
+
+-compile(export_all).
+
+-include("proto.hrl").
+
+
+
+encrypt(Binary) ->
+    Binary.
+    %<<_:8, Binary2/binary>> = Binary,
+    %<<254:8, Binary2/binary>>.
+
+encode_data(Tag, Args) ->
+    Data = encode_data2(Tag, Args),
+    to_binary(Data).
+
+encode_data2(pcs_heartbeat, []) ->
+    #'PCS_heartbeat'{};
+encode_data2(pcs_gm, [Cmd]) ->
+    #'PCS_gm'{cmd = Cmd};
+encode_data2(pcs_set_name, [Name]) ->
+    #'PCS_set_name'{name = Name};
+encode_data2(pcs_set_sex, [Sex]) ->
+    #'PCS_set_sex'{sex = Sex};
+encode_data2(pcs_war_action, [Id, Action]) ->
+    #'PCS_war_action'{id = Id, action = Action};
+encode_data2(pcs_war_action, [Id, Action, Data]) ->
+    #'PCS_war_action'{id = Id, action = Action, data = Data};
+encode_data2(pcs_war_end, [WarId, Type]) ->
+    #'PCS_war_end'{warId = WarId, type = Type};
+encode_data2(pcs_login, [AccName]) ->
+    #'PCS_login'{accname = AccName, passwd = AccName, vs = "trunk"};
+encode_data2(pcs_suff_status, [Id]) ->
+    #'PCS_suff_status'{id = Id};
+encode_data2(pcs_suff_start, [Id]) ->
+    #'PCS_suff_start'{id = Id};
+encode_data2(pcs_suff_detect, [Id]) ->
+    #'PCS_suff_detect'{id = Id};
+encode_data2(pcs_hero_pve, [DungeonType, Floor]) ->
+    #'PCS_hero_pve'{dungeonType = DungeonType, floor = Floor};
+encode_data2(pcs_get_dungeon_data, [DungeonType, Floor]) ->
+    #'PCS_get_dungeon_data'{typeId = DungeonType, floor = Floor};
+encode_data2(pcs_battle, []) ->
+    #'PCS_battle'{};
+encode_data2(pcs_battle_refresh, []) ->
+    #'PCS_battle_refresh'{};
+encode_data2(pcs_select_enemy, [AimId]) ->
+    #'PCS_select_enemy'{aimId = AimId, type = 2};
+encode_data2(pcs_mvm_list, [Id]) ->
+    #'PCS_mvm_list'{id = Id};
+encode_data2(pcs_mvm_start, [AimId, Team]) ->
+    #'PCS_mvm_start'{id = AimId, team = Team};
+encode_data2(pcs_mvm_refresh, [Id]) ->
+    #'PCS_mvm_refresh'{id = Id};
+encode_data2(pcs_set_mvm_team, [Team]) ->
+    #'PCS_set_mvm_team'{defList = Team};
+encode_data2(pcs_get_mvm_team, [Id]) ->
+    #'PCS_get_mvm_team'{id = Id};
+encode_data2(pcs_mvm_rank, []) ->
+    #'PCS_mvm_rank'{};
+encode_data2(pcs_pvp_rank, []) ->
+    #'PCS_pvp_rank'{};
+encode_data2(pcs_map, [MapId, Road, Entry, Exit]) ->
+    #'PCS_map'{typeId = MapId, road = Road, entry = Entry, exit = Exit};
+encode_data2(pcs_mon_on_map, [MonList]) ->
+    #'PCS_mon_on_map'{monList = MonList};
+encode_data2(_Tag, _Args) ->
+    robot:log("encode_data error, ~w, ~w", [_Tag, _Args]),
+    ok.
+
+decode_data(Data) ->
+    Data2 = to_term(Data),
+    decode_data2(Data2).
+
+decode_data2(Data) ->
+    %robot:log("decode data:~w~n", [Data]),
+    Data.
+
+all_proto() ->
+    [
+	{10, pcs_suff_start, []},
+	{10, pcs_suff_status, []},
+	{10, pcs_suff_detect, []},
+	{10, pcs_get_dungeon_data, []},
+	{10, pcs_hero_pve, []},
+	{10, pcs_battle, []},
+	{10, pcs_battle_refresh, []},
+	{10, pcs_select_enemy, []},
+	{10, pcs_mvm_list, []},
+	{10, pcs_mvm_start, []},
+	{10, pcs_mvm_refresh, []},
+	{10, pcs_set_mvm_team, []},
+	{10, pcs_get_mvm_team, []},
+	{10, pcs_mvm_rank, []},
+	{10, pcs_pvp_rank, []},
+	{10, pcs_map, []}
+    ].
+to_binary(Data) ->
+    Binary = term_to_binary(Data),
+    encrypt(Binary).
+
+to_term(Data) ->
+    binary_to_term(Data).

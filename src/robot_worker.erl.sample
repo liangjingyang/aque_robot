@@ -1,0 +1,410 @@
+%%===========================================================================
+%%     FileName: robot_worker.erl
+%%       Author: Liangjingyang
+%%        Email: simple.continue@gmail.com
+%%      Version: 0.1
+%%===========================================================================
+
+-module(robot_worker).
+
+-behaviour(gen_server).
+
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+
+-export([
+        start_link/2
+    ]).
+
+-compile(export_all).
+
+-include("proto.hrl").
+
+
+-define(MONITOR, robot_monitor).
+-define(WORKER_SOCKET, worker_socket).
+-define(HEART_TIMEOUT, 60*1000).
+-define(CHAT_INTERVAL, 60*1000).
+-define(MOVE_INTERVAL, 750).
+-define(CHECK_ACTION_INTERVAL, 2 * 1000).
+
+-define(HERO, hero).
+-define(MAP, map).
+-define(MON_LIST, mon_list).
+-define(ELITE_LIST, elite_list).
+-define(TRAP_LIST, trap_list).
+-define(ITEM_LIST, item_list).
+-define(SUFF_LIST, suff_list).
+-define(ENEMY_LIST, enemy_list).
+
+-define(WAR_TYPE, war_type).
+-define(WAR_TYPE_SUFF, 1).
+-define(WAR_TYPE_PVE, 2).
+-define(WAR_TYPE_PVP, 3).
+-define(WAR_TYPE_MVM, 4).
+
+-define(IS_IN_WAR, is_in_war).
+
+
+
+
+-define(TCP_OPTS, [
+        binary,
+        {packet, 4}, % no packaging
+        {reuseaddr, true}, % allow rebind without waiting
+        {nodelay, false},
+        {delay_send, true},
+        {active, false},
+        {exit_on_close, false}
+    ]).
+
+-record(state, 
+    {
+	robot_id = 0,
+        id = 0,
+        accname = undefined,
+        socket = undefined,
+        config = []
+    }).
+
+
+
+
+start_link(Config, Id) ->
+    gen_server:start_link(?MODULE, [Config, Id], []).
+
+init([Config, Id]) ->
+    Ip = proplists:get_value(server_ip, Config),
+    Port = proplists:get_value(server_port, Config),
+    case gen_tcp:connect(Ip, Port, ?TCP_OPTS) of
+        {ok, Socket} ->
+            register(robot:get_robot_name(Id), self()),
+            erlang:put(?WORKER_SOCKET, Socket),
+            ?MONITOR ! {ready_to_work, Id},
+            erlang:send_after(1000, self(), {start}),
+            random:seed(now()),
+            init_dic(),
+            {ok, #state{robot_id=Id, socket=Socket, config=Config}};
+        Error ->
+            terminate(Error, #state{robot_id=Id}),
+            {stop, Error}
+    end.
+
+init_dic() ->
+    ok.
+
+handle_call({show_state}, _From, State) ->
+    {reply, State, State};
+
+handle_call({show_dic, Key}, _From, State) ->
+    {reply, get_dic(Key), State};
+
+handle_call(_Request, _From, State) ->
+    robot:log("unknow === call === : request=~w, From=~w", [_Request, _From]),
+    {noreply, State}.
+
+handle_cast(_Request, State) ->
+    robot:log("unknow === cast === : request=~w", [_Request]),
+    {noreply, State}.
+
+handle_info({inet_async, Socket, _Ref, {ok, Binary}}, State) ->
+    NewState = response(Binary, State),
+    async_recv(Socket, 0, -1),
+    {noreply, NewState};
+
+handle_info({inet_async, Socket, _, {error,timeout}}, State) ->
+    async_recv(Socket, 0, -1),
+    {noreply, State};
+
+handle_info({inet_async, _Socket, _, {error,closed}}, State) ->
+    robot:log("tcp_recv_closed, id=~w", [State#state.robot_id]),
+    {stop, normal, State};
+
+handle_info({check_action}, State) ->
+    check_action(State),
+    {noreply, State};
+
+handle_info({pcs_heartbeat}, State) ->
+    pcs_heartbeat(),
+    {noreply, State};
+
+handle_info({start}, #state{robot_id=RobotId, config=Config, socket=Socket} = State) ->
+    Profix = proplists:get_value(profix, Config, robot_push),
+    AccName = lists:concat([Profix, "_", RobotId]),
+    request(pcs_login, [AccName]),
+    async_recv(Socket, 0, -1),
+    {noreply, State#state{accname=AccName}};
+
+handle_info({func, Func, Args}, State) ->
+    Res = apply(Func, Args),
+    robot:log("func result : ~w", [Res]),
+    {noreply, State};
+
+handle_info({stop, Reason}, State) ->
+    {stop, Reason, State};
+
+handle_info(_Msg, State) ->
+    robot:log("unknow === info === : msg=~w", [_Msg]),
+    {noreply, State}.
+   
+terminate(Reason, State) ->
+    %io:format("robot dead Reason=~w, State=~w~n", [Reason, State]),
+    robot_monitor ! {worker_dead, State#state.robot_id, Reason},
+    ok.
+
+code_change(_, State, _) ->
+    {ok, State}.
+
+async_recv(Sock, Length, Timeout) when is_port(Sock) ->
+    case prim_inet:async_recv(Sock, Length, Timeout) of
+        {error, Reason} -> throw(Reason);
+        {ok, Res}       -> Res; 
+        Res             -> Res
+    end.
+
+%% ====================================================================================
+
+request(Tag, Args) ->
+    Proto = robot_proto:encode_data(Tag, Args),
+    send(Proto).
+
+response(Data, State) ->
+    Data2 = robot_proto:decode_data(Data),
+    case Data2 of
+	#'PSC_login'{err = 0} ->
+	    #'PSC_login'{
+		hero = Hero,
+	       	map = Map,
+	       	eliteList = EliteList,
+	       	monList = MonList,
+	       	trapList = TrapList,
+	       	itemList = ItemList
+	    } = Data2,
+	    set_hero(Hero),
+	    set_map(Map),
+	    set_elite_list(EliteList),
+	    set_mon_list(MonList),
+	    set_trap_list(TrapList),
+	    set_item_list(ItemList),
+	    State2 = State#state{id = Hero#'PSC_hero'.id},
+	    pcs_set_name(Hero#'PSC_hero'.accname),
+	    pcs_set_sex(),
+	    %pcs_gm(),
+	    pcs_heartbeat(),
+	    %check_action(State2),
+	    State2;
+	#'PSC_suff_start'{warId = WarId, suffList = SuffList} ->
+	    %%这里先临时处理，不排序不分魔神魔兽，排队来发送死亡action
+	    lists:foreach(fun(I) ->
+			request(pcs_war_action, [I, 12])
+		end, lists:seq(601, 601 + length(SuffList))),
+	    request(pcs_war_end, [WarId, 1]),
+	    State;
+	#'PSC_hero_pve'{warId = WarId} ->
+	    %%这里默认死4个把
+	    lists:foreach(fun(I) ->
+			request(pcs_war_action, [I, 12])
+		end, lists:seq(601, 604)),
+	    request(pcs_war_action, [3, 12]),
+	    request(pcs_war_action, [1, 10]),
+	    request(pcs_war_end, [WarId, 1]),
+	    State;
+	#'PSC_hero_pvp'{warId = WarId} ->
+	    lists:foreach(fun(I) ->
+			request(pcs_war_action, [I, 12])
+		end, lists:seq(601, 604)),
+	    request(pcs_war_action, [0, 17, 10]),
+	    request(pcs_war_end, [WarId, 1]),
+	    State;
+	#'PSC_war_win'{} ->
+	    erase_dic(?WAR_TYPE),
+	    State;
+	#'PSC_war_lose'{} ->
+	    erase_dic(?WAR_TYPE),
+	    State;
+	#'PSC_battle'{list = EnemyList} ->
+	    set_enemy_list(EnemyList),
+	    State;
+	#'PSC_mvm_list'{mvmList = MvmList} ->
+	    set_mvm_list(MvmList),
+	    State;
+	#'PSC_mvm_refresh'{mvmList = MvmList} ->
+	    set_mvm_list(MvmList),
+	    State;
+	_ ->
+	    State
+    end.
+
+pcs_heartbeat() ->
+    erlang:send_after(1000 * 10, self(), {pcs_heartbeat}),
+    request(pcs_heartbeat, []).
+
+pcs_set_name(Name) ->
+    request(pcs_set_name, [Name]).
+
+pcs_set_sex() ->
+    Sex = random:uniform(2) - 1,
+    request(pcs_set_sex, [Sex]).
+
+pcs_gm() ->
+    request(pcs_gm, ["god_like 30"]).
+
+pcs_suff_status(_Args, State) ->
+    request(pcs_suff_status, [State#state.id]).
+
+pcs_suff_detect(_Args, State) ->
+    request(pcs_suff_detect, [State#state.id]).
+
+pcs_suff_start(_Args, State) ->
+    case get_war_type() of
+	undefined ->
+	    set_war_type(?WAR_TYPE_SUFF),
+	    request(pcs_suff_start, [State#state.id]);
+	_T ->
+	    ignore
+    end.
+
+pcs_get_dungeon_data(_Args, _State) ->
+    request(pcs_get_dungeon_data, [1005, 18]),
+    ok.
+
+pcs_hero_pve(_Args, _State) ->
+    case get_war_type() of
+	undefined ->
+	    set_war_type(?WAR_TYPE_PVE),
+	    request(pcs_hero_pve, [1005, 18]);
+	_T ->
+	    ignore
+    end.
+
+pcs_battle(_Args, _State) ->
+    request(pcs_battle, []).
+pcs_battle_refresh(_Args, _State) ->
+    request(pcs_battle_refresh, []).
+pcs_select_enemy(_Args, _State) ->
+    case get_war_type() of
+	undefined ->
+	    case get_enemy_list() of
+		[#'PSC_battle_item'{id = AimId}|_] ->
+		    set_war_type(?WAR_TYPE_PVP),
+		    request(pcs_select_enemy, [AimId ]);
+		_ ->
+		    ignore
+	    end;
+	_T ->
+	    ignore
+    end.
+
+pcs_mvm_list(_Args, State) ->
+    request(pcs_mvm_list, [State#state.id]).
+
+pcs_mvm_refresh(_Args, State) ->
+    request(pcs_mvm_refresh, [State#state.id]).
+
+pcs_mvm_start(_Args, _State) ->
+    case get_war_type() of
+	undefined ->
+	    case get_mvm_list() of
+		[#'PSC_mvm'{id = AimId}|_] ->
+		    set_war_type(?WAR_TYPE_MVM),
+		    Team = mod_mvm:random_team(get_mon_list()),
+		    request(pcs_mvm_start, [AimId, Team]);
+		_ ->
+		    ignore
+	    end;
+	_T ->
+	    ignore
+    end.
+
+
+pcs_set_mvm_team(_Args, _State) ->
+    Team = mod_mvm:random_team(get_mon_list()),
+    request(pcs_set_mvm_team, [Team]).
+
+pcs_get_mvm_team(_Args, State) ->
+    request(pcs_get_mvm_team, [State#state.id]).
+
+pcs_mvm_rank(_Args, _State) ->
+    request(pcs_mvm_rank, []).
+
+pcs_pvp_rank(_Args, _State) ->
+    request(pcs_pvp_rank, []).
+
+pcs_skill_up(_Args, _State) ->
+    SkillId = 110000 + random:uniform(6) * 100,
+    request(pcs_skill_up, [SkillId]).
+
+pcs_map(_Args, _State) ->
+    {Road, BornList, Entry, Exit} = mod_map:random_road(70),
+    MonList = misc:randomn(length(BornList), get_mon_list()),
+    MonList2 = mod_mon:set_mon_born(MonList, BornList, []),
+    request(pcs_map, [1005, Road, Entry, Exit]),
+    MonList3 = [#'PCS_ITEM_POS'{id = I, bornTK = B}||#'PSC_mon'{id = I, bornTK = B}<-MonList2],
+    request(pcs_mon_on_map, [MonList3]).
+
+
+%% 行为
+check_action(State) ->
+    erlang:send_after(?CHECK_ACTION_INTERVAL, self(), {check_action}),
+    ProtoList = robot_proto:all_proto(),
+    [{_, Action, Args}] = robot:random_by_rate(ProtoList, 1),
+    %robot:log("action:~w, args:~w, state:~w~n", [Action, Args, State]),
+    ?MODULE:Action(Args, State),
+    ok.
+
+send(Bin) ->
+    Socket = erlang:get(?WORKER_SOCKET),
+    gen_tcp:send(Socket, Bin).
+
+set_dic(Key, Value) ->
+    erlang:put(Key, Value).
+
+get_dic(Key) ->
+    erlang:get(Key).
+
+erase_dic(Key) ->
+    erlang:erase(Key).
+
+set_hero(Hero) ->
+    set_dic(?HERO, Hero).
+get_hero() ->
+    get_dic(?HERO).
+set_mon_list(MonList) ->
+    set_dic(?MON_LIST, MonList).
+get_mon_list() ->
+    get_dic(?MON_LIST).
+set_elite_list(EliteList) ->
+    set_dic(?ELITE_LIST, EliteList).
+get_elite_list() ->
+    get_dic(?ELITE_LIST).
+set_trap_list(TrapList) ->
+    set_dic(?TRAP_LIST, TrapList).
+get_trap_list() ->
+    get_dic(?TRAP_LIST).
+set_item_list(ItemList) ->
+    set_dic(?ITEM_LIST, ItemList).
+get_item_list() ->
+    get_dic(?ITEM_LIST).
+set_map(Map) ->
+    set_dic(?MAP, Map).
+get_map() ->
+    get_dic(?MAP).
+set_suff_list(SuffList) ->
+    set_dic(?SUFF_LIST, SuffList).
+get_suff_list() ->
+    get_dic(?SUFF_LIST).
+set_war_type(WarType) ->
+    set_dic(?WAR_TYPE, WarType).
+get_war_type() ->
+    get_dic(?WAR_TYPE).
+set_enemy_list(List) ->
+    set_dic(?ENEMY_LIST, List).
+get_enemy_list() ->
+    get_dic(?ENEMY_LIST).
+set_sex(Sex) ->
+    set_dic(sex, Sex).
+get_sex() ->
+    get_dic(sex).
+set_mvm_list(MvmList) ->
+    set_dic(mvm_list, MvmList).
+get_mvm_list() ->
+    get_dic(mvm_list).
